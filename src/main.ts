@@ -7,7 +7,11 @@ import { createPhysicsWorld } from './core/physics';
 import { createWorld } from './world/world';
 import { Player } from './player/player';
 import { InteractionSystem } from './interaction/interaction';
-
+import { Inventory, MATERIAL_NAMES } from './core/inventory';
+import { createMaterialPile } from './world/materials';
+import { createMixer } from './construction/mixer';
+import { createWall } from './construction/wall';
+import { Economy } from './core/economy';
 const DEBUG = false;
 
 // Interface
@@ -20,9 +24,12 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <span>EARLY DEVELOPMENT</span>
     </div>
 
+    <div id="inventory"></div>
+    <div id="toast"></div>
+
     <div class="player-info">
       <span>TRABALHADOR AUTÔNOMO</span>
-      <strong>R$ 0,00</strong>
+      <strong id="money">R$ 500,00</strong>
     </div>
 
     <div class="controls">
@@ -53,9 +60,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 `;
 
 async function startGame() {
-  // Inicializar física
+  // Física
   await RAPIER.init();
-
   const physics = createPhysicsWorld();
 
   // Cena
@@ -68,6 +74,45 @@ async function startGame() {
     0.1,
     300
   );
+
+  // Interação e inventário
+  const interaction = new InteractionSystem();
+  const inventory = new Inventory();
+
+  const invEl = document.querySelector('#inventory') as HTMLDivElement;
+
+  inventory.onChange = () => {
+    const rows = inventory
+      .entries()
+      .map(([id, q]) => `<span>${MATERIAL_NAMES[id]}: ${q}</span>`)
+      .join('');
+
+    invEl.innerHTML =
+      '<strong>INVENTÁRIO</strong>' + (rows || '<span>vazio</span>');
+  };
+  inventory.onChange();
+
+
+const economy = new Economy();
+const moneyEl = document.querySelector('#money') as HTMLElement;
+
+  economy.onChange = () => {
+  moneyEl.textContent = economy.format();
+  };
+  economy.onChange();
+
+  // Mensagens na tela
+  const toastEl = document.querySelector('#toast') as HTMLDivElement;
+  let toastTimer: number | undefined;
+
+  function notify(text: string) {
+    toastEl.textContent = text;
+    toastEl.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => {
+      toastEl.style.display = 'none';
+    }, 2500);
+  }
 
   // Renderizador
   const renderer = new THREE.WebGLRenderer({
@@ -95,36 +140,50 @@ async function startGame() {
   // Personagem
   const player = new Player(scene, physics);
 
-  // Interação
-  const interaction = new InteractionSystem();
+  // Pilhas de material
+  createMaterialPile(scene, interaction, inventory, economy, notify, {
+    id: 'tijolo', position: new THREE.Vector3(-4, 0, 0),
+    color: 0xb5523b, size: [1.2, 0.6, 0.8], stock: 40, perPickup: 5, price: 1.2
+  });
 
-  // Objeto de teste: pilha de tijolos
-  const brickPile = new THREE.Mesh(
-    new THREE.BoxGeometry(1.2, 0.6, 0.8),
-    new THREE.MeshStandardMaterial({
-      color: 0xb5523b,
-      roughness: 0.9
-    })
+  createMaterialPile(scene, interaction, inventory, economy, notify, {
+    id: 'areia', position: new THREE.Vector3(-4, 0, -3),
+    color: 0xd8c27a, size: [1.4, 0.7, 1.2], stock: 30, perPickup: 5, price: 8
+  });
+
+  createMaterialPile(scene, interaction, inventory, economy, notify, {
+    id: 'cimento', position: new THREE.Vector3(-4, 0, -6),
+    color: 0x9a9a9a, size: [0.8, 0.5, 0.6], stock: 20, perPickup: 2, price: 12
+  });
+
+  createMaterialPile(scene, interaction, inventory, economy, notify, {
+    id: 'agua', position: new THREE.Vector3(-7, 0, -6),
+    color: 0x3b7fc4, size: [0.6, 0.9, 0.6], stock: 20, perPickup: 5, price: 2
+  });
+
+  // Betoneira
+  createMixer(
+    scene,
+    interaction,
+    inventory,
+    notify,
+    new THREE.Vector3(-8, 0, -2)
   );
 
-  brickPile.position.set(-4, 0.3, 0);
-  brickPile.castShadow = true;
-  brickPile.receiveShadow = true;
+  // Parede
+  const WALL_PAYMENT = 450;
 
-  scene.add(brickPile);
-
-  const brickItem = {
-    object: brickPile,
-    name: 'Pilha de tijolos',
-    prompt: 'E — Pegar tijolos',
-    onInteract: () => {
-      console.log('Pegou:', brickItem.name);
-      scene.remove(brickPile);
-      interaction.unregister(brickItem);
-    }
-  };
-
-  interaction.register(brickItem);
+createWall(
+  scene,
+  interaction,
+  inventory,
+  notify,
+  new THREE.Vector3(-12, 0, -10),
+  () => {
+    economy.earn(WALL_PAYMENT);
+    notify(`Serviço concluído! Você recebeu ${economy.format(WALL_PAYMENT)}`);
+  }
+);
 
   // Captura do mouse
   renderer.domElement.addEventListener('click', () => {
@@ -143,22 +202,17 @@ async function startGame() {
   ) as HTMLDivElement;
 
   document.addEventListener('pointerlockchange', () => {
-    const locked =
-      document.pointerLockElement === renderer.domElement;
-
+    const locked = document.pointerLockElement === renderer.domElement;
     startMessage.style.display = locked ? 'none' : 'flex';
   });
 
   // Câmera
   const cameraTarget = new THREE.Vector3();
   const cameraPosition = new THREE.Vector3();
-
   const cameraDistance = 6;
 
   const timer = new THREE.Timer();
-
   let accumulator = 0;
-
   const fixedStep = 1 / 60;
 
   function animate() {
@@ -167,51 +221,35 @@ async function startGame() {
     timer.update();
     const delta = Math.min(timer.getDelta(), 0.1);
 
-    // Acumula o tempo para a física
+    // Física em passos fixos
     accumulator += delta;
 
-    // Simulação física em intervalos fixos
     while (accumulator >= fixedStep) {
       player.update(fixedStep);
       physics.step();
       accumulator -= fixedStep;
     }
 
-    // Sincroniza o modelo visual após a física
     player.syncVisual();
 
     if (DEBUG && performance.now() % 500 < 16) {
       console.log('pos', player.getPosition(), 'keys', { ...player.keys });
     }
 
-    // Posição atual do personagem
     const position = player.getPosition();
 
-    cameraTarget.set(
-      position.x,
-      position.y + 0.8,
-      position.z
-    );
+    cameraTarget.set(position.x, position.y + 0.8, position.z);
 
     const yaw = player.cameraYaw;
     const pitch = player.cameraPitch;
 
     cameraPosition.set(
-      cameraTarget.x +
-        Math.sin(yaw) * cameraDistance * Math.cos(pitch),
-
-      cameraTarget.y +
-        cameraDistance * Math.sin(pitch),
-
-      cameraTarget.z +
-        Math.cos(yaw) * cameraDistance * Math.cos(pitch)
+      cameraTarget.x + Math.sin(yaw) * cameraDistance * Math.cos(pitch),
+      cameraTarget.y + cameraDistance * Math.sin(pitch),
+      cameraTarget.z + Math.cos(yaw) * cameraDistance * Math.cos(pitch)
     );
 
-    camera.position.lerp(
-      cameraPosition,
-      1 - Math.pow(0.001, delta)
-    );
-
+    camera.position.lerp(cameraPosition, 1 - Math.pow(0.001, delta));
     camera.lookAt(cameraTarget);
 
     // Interação (depois de posicionar a câmera)
@@ -224,7 +262,6 @@ async function startGame() {
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
